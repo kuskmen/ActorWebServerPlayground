@@ -7,7 +7,7 @@ namespace ActorWebServerPlayground;
 
 public sealed class ConnectionActor : IDisposable
 {
-    private readonly Channel<object> _messages;
+    private readonly Channel<string> _messages;
     private readonly Task _processingTask;
     private readonly Socket _connection;
     private readonly byte[] _buffer = new byte[1024];
@@ -15,7 +15,7 @@ public sealed class ConnectionActor : IDisposable
     public ConnectionActor(Socket connection)
     {
         _connection = connection;
-        _messages = Channel.CreateUnbounded<object>();
+        _messages = Channel.CreateUnbounded<string>();
         _processingTask = Task.Factory.StartNew(ProcessMessages, CancellationToken.None, TaskCreationOptions.LongRunning,
             TaskScheduler.Default);
         _ = StartListeningAsync(_connection);
@@ -29,17 +29,12 @@ public sealed class ConnectionActor : IDisposable
         }
     }
 
-    private async Task ReceiveAsync(object message)
+    private async Task ReceiveAsync(string message)
     {
-        switch (message)
-        {
-            case string response:
-                var responseBytes = Encoding.UTF8.GetBytes(response);
-                await Task.Factory.FromAsync(
-                _connection!.BeginSend(responseBytes, 0, response.Length, SocketFlags.None, null, null),
-                _connection.EndSend);
-                break;
-        }
+        var responseBytes = Encoding.UTF8.GetBytes(message);
+        await Task.Factory.FromAsync(
+        _connection!.BeginSend(responseBytes, 0, message.Length, SocketFlags.None, null, null),
+        _connection.EndSend);
     }
 
     private async Task StartListeningAsync(Socket connection)
@@ -71,26 +66,112 @@ public sealed class ConnectionActor : IDisposable
 
 internal sealed class ActorSystem : IDisposable
 {
-    internal readonly NonBlocking.ConcurrentDictionary<IPEndPoint, ConnectionActor> _connectionActors = new();
+    // by default hold up to 50k connections
+    internal readonly LRUCache<IPEndPoint, ConnectionActor> _connections = new(50000);
 
     private ConnectionActor CreateActor(IPEndPoint endpoint, Socket connection)
     {
         var actor = new ConnectionActor(connection);
-        if (!_connectionActors.TryAdd(endpoint, actor))
-        {
-            throw new InvalidOperationException($"Actor with name {endpoint} already exists.");
-        }
+        _connections.Put(endpoint, actor);
         return actor;
     }
 
     public ConnectionActor GetActor(IPEndPoint endpoint, Socket connection)
-        => _connectionActors.TryGetValue(endpoint, out var actor) ? actor : CreateActor(endpoint, connection);
+        => _connections.Get(endpoint) ?? CreateActor(endpoint, connection);
+    
+    public void Dispose()
+    {
+        _connections.Dispose();
+    }
+}
+
+
+
+// TODO: Fix multithreading
+public sealed class LRUCache<TKey, TValue>(int capacity) : IDisposable
+    where TValue : IDisposable
+{
+    private readonly int _capacity = capacity;
+    private readonly Dictionary<TKey, (TValue Value, int Position)> _cache = new(capacity);
+    private readonly CircularBuffer<TKey> _buffer = new(capacity);
+
+    public TValue Get(TKey key)
+    {
+        if (_cache.TryGetValue(key, out var valuePos))
+        {
+            // Move the key to the end (most recently used)
+            _buffer.Remove(valuePos.Position);
+            int newPosition = _buffer.Add(key);
+            _cache[key] = (valuePos.Value, newPosition);
+            return valuePos.Value;
+        }
+        return default;
+    }
+
+    public void Put(TKey key, TValue value)
+    {
+        if (_cache.TryGetValue(key, out var cachedValue))
+        {
+            _buffer.Remove(cachedValue.Position);
+        }
+        else if (_cache.Count >= _capacity)
+        {
+            // Remove the least recently used key
+            var oldestKey = _buffer.Get(_buffer.Start);
+            _buffer.Remove(_buffer.Start);
+            _cache.Remove(oldestKey);
+        }
+
+        // Add the new key-value pair
+        int newPosition = _buffer.Add(key);
+        _cache[key] = (value, newPosition);
+    }
+
+    public int Count => _cache.Count;
 
     public void Dispose()
     {
-        foreach (var actor in _connectionActors.Values)
+        foreach (var (Value, _) in _cache.Values)
         {
-            actor.Dispose();
+            Value.Dispose();
         }
+    }
+
+    private class CircularBuffer<TKey>(int capacity)
+    {
+        private readonly TKey[] _buffer = new TKey[capacity];
+        private int _start = 0;
+        private int _end = 0;
+        private readonly int _capacity = capacity;
+
+        public int Add(TKey item)
+        {
+            _buffer[_end] = item;
+            int position = _end;
+            _end = (_end + 1) % _capacity;
+            if (_end == _start)
+            {
+                _start = (_start + 1) % _capacity;
+            }
+            return position;
+        }
+
+        public TKey Remove(int position)
+        {
+            TKey item = _buffer[position];
+            _buffer[position] = default;
+            return item;
+        }
+
+        public TKey Get(int position)
+        {
+            return _buffer[position];
+        }
+
+        public int Capacity => _capacity;
+
+        public int Start => _start;
+
+        public int End => _end;
     }
 }

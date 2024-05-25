@@ -8,7 +8,7 @@ public class Program
 {
     public static async Task Main()
     {
-        var server = new WebServer();
+        var server = new WebServer(9876);
 
         await server.Listen();
     }
@@ -19,18 +19,18 @@ public static class WebServerStatsKeys
     public const string ActorsCount = nameof(ActorsCount);
 }
 
-public sealed class WebServer
+public sealed class WebServer : IDisposable
 {
     private readonly Socket _listener;
 
     private readonly ActorSystem _actorSystem;
 
-    public WebServer()
+    public WebServer(int port)
     {
         _actorSystem = new ActorSystem();
         _listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        
-        _listener.Bind(new IPEndPoint(IPAddress.Any, 9876));
+
+        _listener.Bind(new IPEndPoint(IPAddress.Any, port));
         _listener.Listen();
 
         Console.WriteLine("WebServer listening on port: 9876");
@@ -55,8 +55,13 @@ public sealed class WebServer
         }
     }
 
+    public void Dispose()
+    {
+        _actorSystem.Dispose();
+    }
+
     public IReadOnlyDictionary<string, object> ServerStats => new Dictionary<string, object>
     {
-        [WebServerStatsKeys.ActorsCount] = _actorSystem._connectionActors.Count,
+        [WebServerStatsKeys.ActorsCount] = _actorSystem._connections.Count,
     };
 }

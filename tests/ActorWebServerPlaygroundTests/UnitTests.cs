@@ -6,68 +6,69 @@ namespace ActorWebServerPlaygroundTests;
 
 public class TcpServerTests
 {
-    private WebServer _server;
-    private readonly int _port = 9876;
     private readonly string _ip = "127.0.0.1";
-
-
-    [OneTimeSetUp]
-    public async Task OneTimeSetup()
-    {
-        _server = new WebServer();
-        _server.Listen();
-
-        await Task.Delay(500);
-    }
 
     [Test]
     public async Task SingleSocket_ShouldHaveOnlyOneActor()
     {
-        // Connect to the server as a client
+        var port = 9876;
+        using var server = new WebServer(port);
+        server.Listen();
+
+        await Task.Delay(500);
+
         using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        await client.ConnectAsync(_ip, _port);
+        await client.ConnectAsync(_ip, port);
 
         // Send a message to the server
-        var message = "Hello, Server!";
-        var messageBytes = Encoding.UTF8.GetBytes(message);
-        var bytesSent = await client.SendAsync(messageBytes);
-
-        // Receive the response
-        var buffer = new byte[1024];
-        var bytesRead = await client.ReceiveAsync(buffer);
-        var response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+        var message = "Hello, Server";
+        var response = await PingPongServer(client, message);
 
         // Verify the response
         Assert.That(response, Is.EqualTo(message));
-        Assert.That((int)_server.ServerStats[WebServerStatsKeys.ActorsCount], Is.EqualTo(1));
+        Assert.That((int)server.ServerStats[WebServerStatsKeys.ActorsCount], Is.EqualTo(1));
 
         message = "Hello, Server for the second time!";
-        messageBytes = Encoding.UTF8.GetBytes(message);
-        bytesSent = await client.SendAsync(messageBytes);
-
-        bytesRead = await client.ReceiveAsync(buffer);
-        response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+        response = await PingPongServer(client, message);
 
         Assert.That(response, Is.EqualTo(message));
-        Assert.That((int)_server.ServerStats[WebServerStatsKeys.ActorsCount], Is.EqualTo(1));
+        Assert.That((int)server.ServerStats[WebServerStatsKeys.ActorsCount], Is.EqualTo(1));
 
     }
 
     [Test]
     public async Task MultipleSockets_ShouldGoToDifferentActors()
     {
+        var port = 9875;
+        using var server = new WebServer(port);
+        server.Listen();
+
+        await Task.Delay(500);
+
+        async Task? pingPong()
+        {
+            using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            await client.ConnectAsync(_ip, port);
+            await PingPongServer(client, "Hello, Server");
+        }
+
         await Task.WhenAll(
             [
-                Task.Run(SingleSocket_ShouldHaveOnlyOneActor),
-                Task.Run(SingleSocket_ShouldHaveOnlyOneActor)
+                Task.Run(pingPong),
+                Task.Run(pingPong)
             ]);
 
-        Assert.That((int)_server.ServerStats[WebServerStatsKeys.ActorsCount], Is.EqualTo(2));
+        Assert.That((int)server.ServerStats[WebServerStatsKeys.ActorsCount], Is.EqualTo(2));
     }
 
-    [OneTimeTearDown]
-    public void OneTimeTearDown()
+    private static async Task<string> PingPongServer(Socket client, string message)
     {
+        var messageBytes = Encoding.UTF8.GetBytes(message);
+        await client.SendAsync(messageBytes);
 
+        // Receive the response
+        var buffer = new byte[1024];
+        var bytesRead = await client.ReceiveAsync(buffer);
+        return Encoding.UTF8.GetString(buffer, 0, bytesRead);
     }
 }
